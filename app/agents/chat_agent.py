@@ -1,15 +1,21 @@
-"""聊天机器人Agent模块。"""
+"""聊天机器人Agent模块，使用LCEL架构。"""
 from typing import List, Dict, Any
 
-from langchain.agents import AgentExecutor, create_react_agent
 from langchain.memory import ConversationBufferMemory
-from langchain.prompts import PromptTemplate
+from langchain.prompts import PromptTemplate, ChatPromptTemplate
 from langchain.tools import BaseTool
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langchain_core.runnables import RunnablePassthrough
+from langchain_core.output_parsers import StrOutputParser
+from langchain.agents.format_scratchpad import format_to_openai_function_messages
+from langchain_core.messages.utils import convert_to_openai_messages
+from langchain.agents.output_parsers import ReActSingleInputOutputParser
+from langchain.agents import AgentExecutor, create_tool_calling_agent
 
 from app.utils.llm import create_llm
 
 class ChatAgent:
-    """聊天机器人Agent实现。"""
+    """聊天机器人Agent实现，使用LCEL架构。"""
     
     def __init__(self, tools: List[BaseTool] = None):
         """初始化聊天Agent。
@@ -23,61 +29,36 @@ class ChatAgent:
             memory_key="chat_history",
             return_messages=True
         )
-        self.agent = self._create_agent()
+        self.agent_chain = self._create_agent_chain()
     
-    def _create_agent(self) -> AgentExecutor:
-        """创建Agent执行器。
+    def _create_agent_chain(self):
+        """创建Agent链，使用LCEL架构。
         
         Returns:
-            Agent执行器实例
+            LCEL格式的Agent链
         """
-        # 定义Agent提示模板，更明确地引导模型使用ReAct格式
-        prompt = PromptTemplate.from_template(
-            """你是一个友好的AI助手，可以与用户进行对话并解答问题。
+        # 定义Agent提示模板
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", """你是一个友好的AI助手，可以与用户进行对话并解答问题。
+            
+你可以使用提供的工具来帮助用户解决问题。请尽可能详细地回答用户的问题。
 
-你有权限使用以下工具:
-{tools}
-
-可用工具名称: {tool_names}
-
-使用工具时，必须使用以下格式：
-思考: 你应该在这里思考如何解决问题的过程
-行动: 工具名称
-行动输入: {{
-    "参数": "值"
-}}
-观察: 工具返回的结果
-... (可以有多轮思考/行动/观察)
-最终回答: 向用户提供最终答案
-
-如果不需要使用工具，请直接使用以下格式：
-思考: 你的思考过程
-最终回答: 向用户提供的最终答案
-
-聊天历史:
-{chat_history}
-
-用户问题: {input}
-
-{agent_scratchpad}
-"""
-        )
+如果不需要使用工具，请直接回答用户的问题。"""),
+            ("human", "{input}"),
+            ("placeholder", "{agent_scratchpad}")
+        ])
         
-        # 创建反应型Agent，添加错误处理
-        agent = create_react_agent(
-            llm=self.llm,
-            tools=self.tools,
-            prompt=prompt
-        )
+        # 使用create_tool_calling_agent创建agent
+        agent = create_tool_calling_agent(self.llm, self.tools, prompt)
         
-        # 创建Agent执行器，添加错误处理
-        return AgentExecutor.from_agent_and_tools(
+        # 创建Agent执行器
+        return AgentExecutor(
             agent=agent,
             tools=self.tools,
             memory=self.memory,
             verbose=True,
-            handle_parsing_errors=True,  # 添加解析错误处理
-            max_iterations=3  # 限制最大迭代次数
+            handle_parsing_errors=True,
+            max_iterations=3
         )
     
     async def process_message(self, message: str) -> Dict[str, Any]:
@@ -90,7 +71,7 @@ class ChatAgent:
             处理结果
         """
         try:
-            result = await self.agent.ainvoke({"input": message})
+            result = await self.agent_chain.ainvoke({"input": message})
             return {
                 "response": result.get("output", ""),
                 "thoughts": result.get("intermediate_steps", [])
